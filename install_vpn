@@ -7,6 +7,7 @@ WG_PORT=51820
 SS_PORT=8388
 VLESS_PORT=443
 IKEV2_PORTS=(500 4500)
+DNSCRYPT_PORT=5353
 
 VPN_USER="vpnuser"
 VPN_PASS="vpnpassword123"
@@ -14,6 +15,7 @@ SS_PASS="shadowsocks_pass_456"
 
 INSTALL_DIR="/opt/unified-vpn"
 
+### === УСТАНОВКА DOCKER === ###
 echo "🔍 Проверка Docker..."
 if ! command -v docker &>/dev/null; then
     echo "📦 Установка Docker и Docker Compose..."
@@ -23,6 +25,28 @@ if ! command -v docker &>/dev/null; then
 fi
 
 mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR"
+
+### === DNSCRYPT-PROXY (ЗАЩИЩЁННЫЙ DNS) === ###
+echo "🔐 Настройка защищённого DNS (dnscrypt-proxy)..."
+
+mkdir -p dnscrypt
+cat > dnscrypt/docker-compose.yml <<EOF
+version: "3"
+services:
+  dnscrypt-proxy:
+    image: jedisct1/dnscrypt-proxy
+    container_name: dnscrypt-proxy
+    ports:
+      - "${DNSCRYPT_PORT}:53/udp"
+      - "${DNSCRYPT_PORT}:53/tcp"
+    volumes:
+      - ./config:/config
+    restart: unless-stopped
+EOF
+
+# Скачаем дефолтный конфиг, если нужно
+mkdir -p dnscrypt/config
+wget -qO dnscrypt/config/dnscrypt-proxy.toml https://raw.githubusercontent.com/DNSCrypt/dnscrypt-proxy/master/dnscrypt-proxy/example-dnscrypt-proxy.toml
 
 ### === Shadowsocks === ###
 echo "📦 Настройка Shadowsocks..."
@@ -34,11 +58,7 @@ services:
   shadowsocks:
     image: shadowsocks/shadowsocks-libev
     container_name: shadowsocks
-    environment:
-      - SERVER_ADDR=0.0.0.0
-      - SERVER_PORT=${SS_PORT}
-      - PASSWORD=${SS_PASS}
-      - METHOD=chacha20-ietf-poly1305
+    command: ss-server -s 0.0.0.0 -p ${SS_PORT} -k ${SS_PASS} -m chacha20-ietf-poly1305 -u --fast-open -d 127.0.0.1:${DNSCRYPT_PORT}
     ports:
       - "${SS_PORT}:${SS_PORT}/tcp"
       - "${SS_PORT}:${SS_PORT}/udp"
@@ -50,7 +70,7 @@ echo "📦 Настройка WireGuard..."
 
 mkdir -p wireguard
 cat > wireguard/docker-compose.yml <<EOF
-version: "3.8"
+version: "3"
 services:
   wireguard:
     image: linuxserver/wireguard
@@ -65,6 +85,7 @@ services:
       - SERVERPORT=${WG_PORT}
       - PEERS=${VPN_USER}
       - ALLOWEDIPS=0.0.0.0/0
+      - DNS=127.0.0.1
     volumes:
       - ./config:/config
       - /lib/modules:/lib/modules
@@ -80,15 +101,16 @@ echo "📦 Настройка IKEv2 (IPsec)..."
 
 mkdir -p ikev2
 cat > ikev2/docker-compose.yml <<EOF
-version: "3.8"
+version: "3"
 services:
   ipsec-vpn-server:
     image: hwdsl2/ipsec-vpn-server
     container_name: ipsec-vpn
     environment:
-      - VPN_IPSEC_PSK=your_ipsec_psk
+      - VPN_IPSEC_PSK=pskvpn123
       - VPN_USER=${VPN_USER}
       - VPN_PASSWORD=${VPN_PASS}
+      - VPN_DNS_NAME=127.0.0.1
     privileged: true
     ports:
       - "500:500/udp"
@@ -96,27 +118,25 @@ services:
     restart: always
 EOF
 
-### === VLESS (Xray) === ###
-echo "📦 Настройка VLESS (XTLS-REALITY)..."
+### === VLESS (Xray-Reality) === ###
+echo "📦 Настройка VLESS..."
 
-mkdir -p vless
-cd vless
-
+mkdir -p vless && cd vless
 git clone https://github.com/myelectronix/xtls-reality-docker vless-source
 cd vless-source
-./install.sh
-
+./install.sh || echo "⚠️ Не удалось установить VLESS автоматически. Проверь вручную."
 cd "$INSTALL_DIR"
 
-### === Запуск всех VPN-сервисов === ###
-echo "🚀 Запуск всех сервисов..."
+### === ЗАПУСК ВСЕГО === ###
+echo "🚀 Запуск всех контейнеров..."
 
+docker compose -f dnscrypt/docker-compose.yml up -d
 docker compose -f shadowsocks/docker-compose.yml up -d
 docker compose -f wireguard/docker-compose.yml up -d
 docker compose -f ikev2/docker-compose.yml up -d
 
-### === Настройка UFW === ###
-echo "🔐 Настройка брандмауэра UFW..."
+### === НАСТРОЙКА UFW === ###
+echo "🔐 Настройка UFW..."
 
 if ! command -v ufw &>/dev/null; then
     apt install -y ufw
@@ -126,9 +146,10 @@ ufw default deny incoming
 ufw default allow outgoing
 
 ufw allow 22/tcp
+ufw allow ${WG_PORT}/udp
 ufw allow ${SS_PORT}/tcp
 ufw allow ${SS_PORT}/udp
-ufw allow ${WG_PORT}/udp
+ufw allow ${DNSCRYPT_PORT}/udp
 ufw allow ${VLESS_PORT}/tcp
 for port in "${IKEV2_PORTS[@]}"; do
     ufw allow ${port}/udp
@@ -136,13 +157,15 @@ done
 
 ufw --force enable
 
-### === Установка Fail2Ban === ###
-echo "🛡️ Установка и запуск Fail2Ban..."
+### === УСТАНОВКА Fail2Ban === ###
+echo "🛡️ Установка Fail2Ban..."
 
 apt install -y fail2ban
 systemctl enable --now fail2ban
 
-echo "✅ Готово!"
-echo "• Shadowsocks пароль: ${SS_PASS}"
-echo "• WireGuard peer: ${VPN_USER}"
+### === ИНФО === ###
+echo -e "\n✅ Установка завершена!"
+echo "• Shadowsocks: пароль — ${SS_PASS}, порт — ${SS_PORT}"
+echo "• WireGuard: peer — ${VPN_USER}, порт — ${WG_PORT}"
 echo "• IKEv2: ${VPN_USER} / ${VPN_PASS}"
+echo "• DNS через dnscrypt-proxy на порту ${DNSCRYPT_PORT}"
