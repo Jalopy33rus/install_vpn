@@ -1,0 +1,93 @@
+#!/bin/bash
+
+set -e
+
+# === Настройки портов ===
+WG_PORT=51820
+SS_PORT=101
+
+# === Установка UFW и настройка ===
+echo "🔐 Настройка UFW..."
+
+if ! command -v ufw &> /dev/null; then
+  echo "📦 Установка ufw..."
+  apt update && apt install -y ufw
+fi
+
+ufw allow 22/tcp
+ufw allow ${WG_PORT}/udp
+ufw allow ${SS_PORT}/tcp
+ufw allow ${SS_PORT}/udp
+
+ufw --force enable
+
+# === Создание директории ===
+mkdir -p ~/docker-vpn && cd ~/docker-vpn
+
+# === WireGuard Docker ===
+echo "⚙️ Настройка WireGuard в Docker..."
+
+mkdir -p wireguard && cd wireguard
+
+cat > docker-compose.yml <<EOF
+version: '3.8'
+
+services:
+  wireguard:
+    image: linuxserver/wireguard
+    container_name: wireguard
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - SERVERPORT=${WG_PORT}
+      - PEERS=client1
+      - ALLOWEDIPS=0.0.0.0/0
+    volumes:
+      - ./config:/config
+      - /lib/modules:/lib/modules
+    ports:
+      - "${WG_PORT}:${WG_PORT}/udp"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+EOF
+
+cd ..
+
+# === Shadowsocks Docker ===
+echo "⚙️ Настройка Shadowsocks в Docker..."
+
+mkdir -p shadowsocks && cd shadowsocks
+
+cat > docker-compose.yml <<EOF
+version: '3'
+
+services:
+  shadowsocks:
+    image: shadowsocks/shadowsocks-libev
+    container_name: shadowsocks
+    ports:
+      - "${SS_PORT}:${SS_PORT}/tcp"
+      - "${SS_PORT}:${SS_PORT}/udp"
+    environment:
+      - SERVER_ADDR=0.0.0.0
+      - SERVER_PORT=${SS_PORT}
+      - PASSWORD=Oqdj2VIWQJ91
+      - METHOD=chacha20-ietf-poly1305
+    restart: unless-stopped
+EOF
+
+cd ..
+
+# === Запуск всех контейнеров ===
+echo "🚀 Запуск WireGuard и Shadowsocks..."
+docker compose -f wireguard/docker-compose.yml up -d
+docker compose -f shadowsocks/docker-compose.yml up -d
+
+echo -e "\n✅ Готово!"
+echo "WireGuard порт: ${WG_PORT}/udp"
+echo "Shadowsocks порт: ${SS_PORT}/tcp и udp"
