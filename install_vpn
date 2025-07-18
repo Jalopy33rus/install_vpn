@@ -2,16 +2,23 @@
 
 set -e
 
+echo "🔐 Введите логин для VPN (WireGuard / IKEv2):"
+read -rp "Логин: " VPN_USER
+
+echo "🔐 Введите пароль для VPN (WireGuard / IKEv2):"
+read -rsp "Пароль: " VPN_PASS
+echo ""
+
+echo "🔐 Введите пароль для Shadowsocks:"
+read -rsp "Пароль: " SS_PASS
+echo ""
+
 ### === НАСТРОЙКИ === ###
 WG_PORT=51820
 SS_PORT=8388
 VLESS_PORT=443
 IKEV2_PORTS=(500 4500)
 DNSCRYPT_PORT=5353
-
-VPN_USER="vpnuser"
-VPN_PASS="vpnpassword123"
-SS_PASS="shadowsocks_pass_456"
 
 INSTALL_DIR="/opt/unified-vpn"
 
@@ -26,7 +33,7 @@ fi
 
 mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR"
 
-### === DNSCRYPT-PROXY (ЗАЩИЩЁННЫЙ DNS) === ###
+### === DNSCRYPT-PROXY === ###
 echo "🔐 Настройка защищённого DNS (dnscrypt-proxy)..."
 
 mkdir -p dnscrypt
@@ -44,7 +51,6 @@ services:
     restart: unless-stopped
 EOF
 
-# Скачаем дефолтный конфиг, если нужно
 mkdir -p dnscrypt/config
 wget -qO dnscrypt/config/dnscrypt-proxy.toml https://raw.githubusercontent.com/DNSCrypt/dnscrypt-proxy/master/dnscrypt-proxy/example-dnscrypt-proxy.toml
 
@@ -165,7 +171,7 @@ systemctl enable --now fail2ban
 
 ### === ИНФО === ###
 echo -e "\n✅ Установка завершена!"
-echo "• Shadowsocks: пароль — ${SS_PASS}, порт — ${SS_PORT}"
-echo "• WireGuard: peer — ${VPN_USER}, порт — ${WG_PORT}"
-echo "• IKEv2: ${VPN_USER} / ${VPN_PASS}"
-echo "• DNS через dnscrypt-proxy на порту ${DNSCRYPT_PORT}"
+echo "• Shadowsocks: порт — ${SS_PORT}, пароль — ${SS_PASS}"
+echo "• WireGuard peer — ${VPN_USER}, порт — ${WG_PORT}"
+echo "• IKEv2: логин — ${VPN_USER}, пароль — ${VPN_PASS}"
+echo "• DNS через dnscrypt-proxy: 127.0.0.1:${DNSCRYPT_PORT}"
