@@ -58,7 +58,7 @@ services:
   shadowsocks:
     image: shadowsocks/shadowsocks-libev
     container_name: shadowsocks
-    command: ss-server -s 0.0.0.0 -p ${SS_PORT} -k ${SS_PASS} -m chacha20-ietf-poly1305 -u --fast-open -d 127.0.0.1:${DNSCRYPT_PORT}
+    command: ss-server -s 0.0.0.0 -p ${SS_PORT} -k ${SS_PASS} -m xchacha20-ietf-poly1305 -u --fast-open -d 127.0.0.1:${DNSCRYPT_PORT}
     ports:
       - "${SS_PORT}:${SS_PORT}/tcp"
       - "${SS_PORT}:${SS_PORT}/udp"
