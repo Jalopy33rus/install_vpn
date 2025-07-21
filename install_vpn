@@ -1,177 +1,127 @@
 #!/bin/bash
 
 set -e
+INSTALL_DIR="$HOME/vpn_install"
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 
-echo "🔐 Введите логин для VPN (WireGuard / IKEv2):"
-read -rp "Логин: " VPN_USER
-
-echo "🔐 Введите пароль для VPN (WireGuard / IKEv2):"
-read -rsp "Пароль: " VPN_PASS
-echo ""
-
-echo "🔐 Введите пароль для Shadowsocks:"
-read -rsp "Пароль: " SS_PASS
-echo ""
-
-### === НАСТРОЙКИ === ###
-WG_PORT=51820
-SS_PORT=8388
-VLESS_PORT=443
-IKEV2_PORTS=(500 4500)
-DNSCRYPT_PORT=5353
-
-INSTALL_DIR="/opt/unified-vpn"
-
-### === УСТАНОВКА DOCKER === ###
-echo "🔍 Проверка Docker..."
-if ! command -v docker &>/dev/null; then
-    echo "📦 Установка Docker и Docker Compose..."
-    apt update
-    apt install -y docker.io docker-compose
-    systemctl enable --now docker
+### === Проверка и установка Docker === ###
+echo "🔧 Проверка Docker..."
+if ! command -v docker &> /dev/null; then
+  echo "📦 Устанавливаю Docker..."
+  curl -fsSL https://get.docker.com | bash
+  systemctl enable docker
+  systemctl start docker
 fi
 
-mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR"
+### === Проверка docker compose === ###
+echo "🔧 Проверка Docker Compose..."
+if docker compose version &>/dev/null; then
+  COMPOSE_CMD="docker compose"
+elif docker-compose version &>/dev/null; then
+  COMPOSE_CMD="docker-compose"
+else
+  echo "📦 Устанавливаю docker-compose..."
+  apt install -y docker-compose
+  COMPOSE_CMD="docker-compose"
+fi
 
-### === DNSCRYPT-PROXY === ###
-echo "🔐 Настройка защищённого DNS (dnscrypt-proxy)..."
+### === Ввод логинов и паролей === ###
+read -p "Введите пароль для Shadowsocks: " SS_PASSWORD
+read -p "Введите логин для IKEv2/WireGuard: " VPN_USER
+read -p "Введите пароль для IKEv2/WireGuard: " VPN_PASS
 
-mkdir -p dnscrypt
-cat > dnscrypt/docker-compose.yml <<EOF
-version: "3"
-services:
-  dnscrypt-proxy:
-    image: jedisct1/dnscrypt-proxy
-    container_name: dnscrypt-proxy
-    ports:
-      - "${DNSCRYPT_PORT}:53/udp"
-      - "${DNSCRYPT_PORT}:53/tcp"
-    volumes:
-      - ./config:/config
-    restart: unless-stopped
-EOF
-
-mkdir -p dnscrypt/config
-wget -qO dnscrypt/config/dnscrypt-proxy.toml https://raw.githubusercontent.com/DNSCrypt/dnscrypt-proxy/master/dnscrypt-proxy/example-dnscrypt-proxy.toml
-
-### === Shadowsocks === ###
-echo "📦 Настройка Shadowsocks..."
-
+### === Shadowsocks (xchacha20-ietf-poly1305) === ###
 mkdir -p shadowsocks
 cat > shadowsocks/docker-compose.yml <<EOF
-version: "3"
+version: '3'
 services:
-  shadowsocks:
-    image: shadowsocks/shadowsocks-libev
-    container_name: shadowsocks
-    command: ss-server -s 0.0.0.0 -p ${SS_PORT} -k ${SS_PASS} -m xchacha20-ietf-poly1305 -u --fast-open -d 127.0.0.1:${DNSCRYPT_PORT}
+  ssserver:
+    image: ghcr.io/shadowsocks/ssserver-rust
+    container_name: ss-server
     ports:
-      - "${SS_PORT}:${SS_PORT}/tcp"
-      - "${SS_PORT}:${SS_PORT}/udp"
+      - "8388:8388/tcp"
+      - "8388:8388/udp"
+    environment:
+      - PASSWORD=$SS_PASSWORD
+      - METHOD=xchacha20-ietf-poly1305
     restart: unless-stopped
 EOF
 
-### === WireGuard === ###
-echo "📦 Настройка WireGuard..."
-
+### === WireGuard (Docker + логин/пароль) === ###
 mkdir -p wireguard
 cat > wireguard/docker-compose.yml <<EOF
-version: "3"
+version: '3'
 services:
   wireguard:
-    image: linuxserver/wireguard
-    container_name: wireguard
+    image: weejewel/wg-easy
+    container_name: wg-easy
+    environment:
+      - WG_HOST=your_vpn_ip_or_domain
+      - PASSWORD=$VPN_PASS
+    ports:
+      - "51820:51820/udp"
+      - "51821:51821/tcp"
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Etc/UTC
-      - SERVERPORT=${WG_PORT}
-      - PEERS=${VPN_USER}
-      - ALLOWEDIPS=0.0.0.0/0
-      - DNS=127.0.0.1
-    volumes:
-      - ./config:/config
-      - /lib/modules:/lib/modules
-    ports:
-      - "${WG_PORT}:${WG_PORT}/udp"
     sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv4.ip_forward=1
+    volumes:
+      - ./config:/etc/wireguard
     restart: unless-stopped
 EOF
 
-### === IKEv2 === ###
-echo "📦 Настройка IKEv2 (IPsec)..."
-
+### === IKEv2 VPN (strongSwan в Docker) === ###
 mkdir -p ikev2
 cat > ikev2/docker-compose.yml <<EOF
-version: "3"
+version: '3'
 services:
-  ipsec-vpn-server:
-    image: hwdsl2/ipsec-vpn-server
-    container_name: ipsec-vpn
+  ikev2:
+    image: mobtitude/docker-strongswan
+    container_name: ikev2
     environment:
-      - VPN_IPSEC_PSK=pskvpn123
-      - VPN_USER=${VPN_USER}
-      - VPN_PASSWORD=${VPN_PASS}
-      - VPN_DNS_NAME=127.0.0.1
-    privileged: true
+      - VPN_USER=$VPN_USER
+      - VPN_PASSWORD=$VPN_PASS
     ports:
       - "500:500/udp"
       - "4500:4500/udp"
-    restart: always
+    restart: unless-stopped
 EOF
 
-### === VLESS (Xray-Reality) === ###
-echo "📦 Настройка VLESS..."
-
+### === VLESS (Xray Reality) === ###
+echo "📦 Установка VLESS..."
 mkdir -p vless && cd vless
-git clone https://github.com/myelectronix/xtls-reality-docker vless-source
+if [ ! -d "vless-source" ]; then
+  git clone https://github.com/myelectronix/xtls-reality-docker vless-source
+fi
 cd vless-source
+chmod +x install.sh
 ./install.sh || echo "⚠️ Не удалось установить VLESS автоматически. Проверь вручную."
 cd "$INSTALL_DIR"
 
-### === ЗАПУСК ВСЕГО === ###
-echo "🚀 Запуск всех контейнеров..."
-
-docker compose -f dnscrypt/docker-compose.yml up -d
-docker compose -f shadowsocks/docker-compose.yml up -d
-docker compose -f wireguard/docker-compose.yml up -d
-docker compose -f ikev2/docker-compose.yml up -d
-
-### === НАСТРОЙКА UFW === ###
-echo "🔐 Настройка UFW..."
-
-if ! command -v ufw &>/dev/null; then
-    apt install -y ufw
-fi
-
-ufw default deny incoming
-ufw default allow outgoing
-
-ufw allow 22/tcp
-ufw allow ${WG_PORT}/udp
-ufw allow ${SS_PORT}/tcp
-ufw allow ${SS_PORT}/udp
-ufw allow ${DNSCRYPT_PORT}/udp
-ufw allow ${VLESS_PORT}/tcp
-for port in "${IKEV2_PORTS[@]}"; do
-    ufw allow ${port}/udp
-done
-
+### === Открытие портов через UFW === ###
+echo "🛡️ Настройка UFW..."
+apt install -y ufw
+ufw allow OpenSSH
+ufw allow 8388/tcp
+ufw allow 8388/udp
+ufw allow 51820/udp
+ufw allow 51821/tcp
+ufw allow 500/udp
+ufw allow 4500/udp
 ufw --force enable
 
-### === УСТАНОВКА Fail2Ban === ###
+### === Установка Fail2Ban === ###
 echo "🛡️ Установка Fail2Ban..."
-
 apt install -y fail2ban
-systemctl enable --now fail2ban
+systemctl enable fail2ban
+systemctl start fail2ban
 
-### === ИНФО === ###
-echo -e "\n✅ Установка завершена!"
-echo "• Shadowsocks: порт — ${SS_PORT}, пароль — ${SS_PASS}"
-echo "• WireGuard peer — ${VPN_USER}, порт — ${WG_PORT}"
-echo "• IKEv2: логин — ${VPN_USER}, пароль — ${VPN_PASS}"
-echo "• DNS через dnscrypt-proxy: 127.0.0.1:${DNSCRYPT_PORT}"
+### === Запуск контейнеров === ###
+echo "🚀 Запуск всех VPN контейнеров..."
+$COMPOSE_CMD -f shadowsocks/docker-compose.yml up -d
+$COMPOSE_CMD -f wireguard/docker-compose.yml up -d
+$COMPOSE_CMD -f ikev2/docker-compose.yml up -d
+
+echo "✅ Установка завершена!"
