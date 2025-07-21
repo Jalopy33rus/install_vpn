@@ -1,202 +1,92 @@
 #!/bin/bash
+
 set -e
 
-INSTALL_DIR="$HOME/vpn_setup"
-mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR"
+# === ПЕРЕМЕННЫЕ ===
+VLESS_DIR="/opt/vless-reality"
+XRAY_IMAGE="teddysun/xray"
+XRAY_CONTAINER="xray-vless"
+CONFIG_FILE="${VLESS_DIR}/config.json"
+DOMAIN=""
+PRIVATE_KEY=""
+PUBLIC_KEY=""
+SHORT_ID=""
+UUID=""
+SERVER_NAME=""
 
-### === Установка Docker и Docker Compose === ###
-echo "🔧 Установка Docker..."
-if ! command -v docker &>/dev/null; then
-  curl -fsSL https://get.docker.com | bash
-  systemctl enable docker
-  systemctl start docker
+# === ПРОВЕРКА: Установлен ли VLESS (по папке и config.json) ===
+if [ -f "${CONFIG_FILE}" ]; then
+    echo "✅ VLESS с Reality уже установлен. Пропускаем установку."
+    exit 0
 fi
 
-echo "🔧 Проверка docker compose..."
-if docker compose version &>/dev/null; then
-  COMPOSE_CMD="docker compose"
-elif docker-compose version &>/dev/null; then
-  COMPOSE_CMD="docker-compose"
-else
-  apt install -y docker-compose
-  COMPOSE_CMD="docker-compose"
-fi
+# === ВВОД ДАННЫХ ОТ ПОЛЬЗОВАТЕЛЯ ===
+read -rp "🌐 Введите ваш домен или IP-адрес (для SNI/ServerName): " DOMAIN
 
-### === Ввод логинов/паролей === ###
-read -p "🧠 Введите пароль для Shadowsocks: " SS_PASSWORD
-read -p "🧠 Введите логин для IKEv2/WireGuard: " VPN_USER
-read -p "🧠 Введите пароль для IKEv2/WireGuard: " VPN_PASS
-read -p "🌐 Введите ваш домен или IP-адрес для VLESS/WG: " SERVER_DOMAIN
-
-### === SHADOWSOCKS (Rust) === ###
-mkdir -p shadowsocks
-cat > shadowsocks/docker-compose.yml <<EOF
-version: '3'
-services:
-  ssserver:
-    image: ghcr.io/shadowsocks/ssserver-rust
-    container_name: ss-server
-    ports:
-      - "8388:8388/tcp"
-      - "8388:8388/udp"
-    environment:
-      - PASSWORD=$SS_PASSWORD
-      - METHOD=xchacha20-ietf-poly1305
-    restart: unless-stopped
-EOF
-
-### === WIREGUARD (wg-easy) === ###
-mkdir -p wireguard
-cat > wireguard/docker-compose.yml <<EOF
-version: '3'
-services:
-  wireguard:
-    image: weejewel/wg-easy
-    container_name: wg-easy
-    environment:
-      - WG_HOST=$SERVER_DOMAIN
-      - PASSWORD=$VPN_PASS
-    ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    sysctls:
-      - net.ipv4.ip_forward=1
-    volumes:
-      - ./config:/etc/wireguard
-    restart: unless-stopped
-EOF
-
-### === IKEv2 (strongSwan) === ###
-mkdir -p ikev2
-cat > ikev2/docker-compose.yml <<EOF
-version: '3'
-services:
-  ikev2:
-    image: mobtitude/docker-strongswan
-    container_name: ikev2
-    environment:
-      - VPN_USER=$VPN_USER
-      - VPN_PASSWORD=$VPN_PASS
-    ports:
-      - "500:500/udp"
-      - "4500:4500/udp"
-    restart: unless-stopped
-EOF
-
-### === VLESS (Xray-Reality) === ###
-mkdir -p vless/config && cd vless
-echo "🔐 Генерация ключей X25519..."
-KEYS=$(docker run --rm teddysun/xray xray x25519)
-PRIV_KEY=$(echo "$KEYS" | grep "Private key" | awk '{print $NF}')
-PUB_KEY=$(echo "$KEYS" | grep "Public key" | awk '{print $NF}')
+# === ГЕНЕРАЦИЯ Reality ключей ===
+echo "🔐 Генерация Reality ключей (X25519)..."
+KEYS=$(docker run --rm "${XRAY_IMAGE}" xray x25519)
+PRIVATE_KEY=$(echo "$KEYS" | grep 'Private key:' | awk '{print $3}')
+PUBLIC_KEY=$(echo "$KEYS" | grep 'Public key:' | awk '{print $3}')
+SHORT_ID=$(openssl rand -hex 8)
 UUID=$(cat /proc/sys/kernel/random/uuid)
+SERVER_NAME="${DOMAIN}"
 
-cat > config/config.json <<EOF
+# === СОЗДАНИЕ ПАПКИ И CONFIG.JSON ===
+mkdir -p "${VLESS_DIR}"
+
+cat > "${CONFIG_FILE}" <<EOF
 {
   "log": {
     "loglevel": "warning"
   },
-  "inbounds": [
-    {
-      "port": 443,
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "www.cloudflare.com:443",
-          "xver": 0,
-          "serverNames": ["www.cloudflare.com"],
-          "privateKey": "$PRIV_KEY",
-          "shortIds": ["0123456789abcdef"]
-        }
+  "inbounds": [{
+    "port": 443,
+    "protocol": "vless",
+    "settings": {
+      "clients": [{
+        "id": "${UUID}",
+        "flow": "xtls-rprx-vision"
+      }],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "show": false,
+        "dest": "www.cloudflare.com:443",
+        "xver": 0,
+        "serverNames": ["${SERVER_NAME}"],
+        "privateKey": "${PRIVATE_KEY}",
+        "shortIds": ["${SHORT_ID}"]
       }
     }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom"
-    }
-  ]
+  }],
+  "outbounds": [{
+    "protocol": "freedom"
+  }]
 }
 EOF
 
-cat > docker-compose.yml <<EOF
-version: '3'
-services:
-  vless:
-    image: teddysun/xray
-    container_name: vless
-    volumes:
-      - ./config:/etc/xray
-    ports:
-      - "443:443"
-    restart: unless-stopped
-EOF
-cd "$INSTALL_DIR"
+# === ЗАПУСК XRAY-КОНТЕЙНЕРА С КОНФИГОМ ===
+echo "🚀 Запуск VLESS + Reality с кастомной конфигурацией..."
+docker run -d \
+  --name ${XRAY_CONTAINER} \
+  --restart unless-stopped \
+  -p 443:443 \
+  -v ${VLESS_DIR}/config.json:/etc/xray/config.json \
+  ${XRAY_IMAGE}
 
-### === UFW Firewall === ###
-apt install -y ufw
-ufw allow OpenSSH
-ufw allow 8388/tcp
-ufw allow 8388/udp
-ufw allow 51820/udp
-ufw allow 51821/tcp
-ufw allow 500/udp
-ufw allow 4500/udp
-ufw allow 443/tcp
-ufw --force enable
-
-### === Fail2Ban === ###
-apt install -y fail2ban
-systemctl enable fail2ban
-systemctl start fail2ban
-
-### === Запуск всех сервисов === ###
-$COMPOSE_CMD -f shadowsocks/docker-compose.yml up -d
-$COMPOSE_CMD -f wireguard/docker-compose.yml up -d
-$COMPOSE_CMD -f ikev2/docker-compose.yml up -d
-$COMPOSE_CMD -f vless/docker-compose.yml up -d
-
-### === Вывод настроек === ###
-SS_URI="ss://$(echo -n "xchacha20-ietf-poly1305:$SS_PASSWORD" | base64 -w0)@$SERVER_DOMAIN:8388#Shadowsocks"
-
+# === ВЫВОД ДАННЫХ ДЛЯ КЛИЕНТА ===
 echo ""
-echo "🎉 VPN УСТАНОВЛЕН! Вот ваши данные:"
+echo "✅ VLESS + Reality успешно установлен!"
+echo "📌 UUID: ${UUID}"
+echo "🔐 PublicKey: ${PUBLIC_KEY}"
+echo "🧩 ShortID: ${SHORT_ID}"
+echo "🌐 ServerName (SNI): ${SERVER_NAME}"
 echo ""
-echo "📦 Shadowsocks:"
-echo "   🔑 Метод: xchacha20-ietf-poly1305"
-echo "   🔐 Пароль: $SS_PASSWORD"
-echo "   🌍 Хост: $SERVER_DOMAIN"
-echo "   📱 URI: $SS_URI"
+echo "📎 Пример ссылки для клиента (например, v2rayN):"
 echo ""
-
-echo "📦 WireGuard & IKEv2:"
-echo "   👤 Логин: $VPN_USER"
-echo "   🔐 Пароль: $VPN_PASS"
-echo "   📡 Хост: $SERVER_DOMAIN"
-echo ""
-
-echo "📦 VLESS (Reality):"
-echo "   🔑 UUID: $UUID"
-echo "   🔐 Public Key: $PUB_KEY"
-echo "   🧩 shortId: 0123456789abcdef"
-echo "   🎯 SNI: www.cloudflare.com"
-echo ""
-
-echo "🔗 Shadowsocks QR: https://qrcode.show?text=$(echo -n "$SS_URI" | jq -sRr @uri)"
+echo "vless://${UUID}@${DOMAIN}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SERVER_NAME}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#VLESS-Reality"
 echo ""
