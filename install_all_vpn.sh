@@ -143,7 +143,7 @@ fi
 # === ВЫВОД ДАННЫХ ===
 echo -e "\n${GREEN}🎉 Установка завершена. Данные для подключения:${NC}"
 echo -e "\n${BLUE}--- Shadowsocks ---${NC}"
-echo "ss://$(echo -n "chacha20-ietf-poly1305:$SS_PASS@$(curl -s ifconfig.me):8388" | base64 -w0)#SS"
+echo "ss://$(echo -n "xchacha20-ietf-poly1305:$SS_PASS@$(curl -s ifconfig.me):8388" | base64 -w0)#SS"
 
 echo -e "\n${BLUE}--- WireGuard ---${NC}"
 echo "Панель: http://$(curl -s ifconfig.me):51821"
